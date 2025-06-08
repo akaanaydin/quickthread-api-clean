@@ -1,8 +1,7 @@
 {
-  "name": "quickthread-api-clean",
-  "version": "1.0.0",
   "dependencies": {
-    "@sparticuz/chromium": "^133.0.0",
-    "puppeteer-core": "^24.10.0"
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12"
   }
 }
+
