@@ -42,7 +42,7 @@ module.exports = async (req, res) => {
     /* 2️⃣  “Show this thread” düğmesine bas (varsa) */
     const clickedThread = await page.evaluate(() => {
       const spans = [...document.querySelectorAll('span')];
-      const span  = spans.find(s => s.textContent?.trim().toLowerCase() === 'show this thread');
+      const span  = spans.find(s => s.textContent?.trim().toLowerCase() === 'Show more replies');
       if (!span) return false;
       const btn = span.closest('a,button,div[role="button"]');
       if (btn) { btn.click(); return true; }
