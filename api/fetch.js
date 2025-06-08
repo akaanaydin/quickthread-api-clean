@@ -1,52 +1,67 @@
-const axios   = require('axios');
-const cheerio = require('cheerio');
+/* … axios/cheerio sürümü yerine puppeteer kullanıyoruz (15 tweet çekmek için) */
+const chromium  = require('@sparticuz/chromium');
+const puppeteer = require('puppeteer-core');
 
-const NITTERS = [
-  'https://nitter.net',
-  'https://nitter.pufe.org',
-  'https://nitter.whatever.social',
-  'https://nitter.cz'
-];
+function parseCookie(str) {
+  return str.split(';').map(v => v.trim()).filter(Boolean).map(kv => {
+    const [name, ...rest] = kv.split('=');
+    return {
+      name,
+      value: rest.join('='),
+      domain: '.twitter.com',
+      path: '/',
+      httpOnly: true,
+      secure: true
+    };
+  });
+}
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST')
     return res.status(405).json({ error: 'Use POST' });
 
-  const { url } = req.body || {};
+  const { url, cookies } = req.body || {};
   if (!url) return res.status(400).json({ error: 'url missing' });
+  const tweetId = (url.match(/status\/(\d+)/) || [])[1];
+  if (!tweetId) return res.status(400).json({ error: 'bad tweet url' });
+  if (!cookies) return res.status(400).json({ error: 'cookies missing' });
 
-  /* tweet URL parçala */
-  const m = url.match(/https?:\/\/[^/]+\/([^/]+)\/status\/(\d+)/);
-  if (!m) return res.status(400).json({ error: 'bad tweet url' });
-  const [ , user, id ] = m;
+  try {
+    const browser = await puppeteer.launch({
+      args: chromium.args,
+      defaultViewport: chromium.defaultViewport,
+      executablePath: await chromium.executablePath(),
+      headless: chromium.headless
+    });
 
-  for (const base of NITTERS) {
-    try {
-      const nURL = `${base}/${user}/status/${id}`;
-      const { data } = await axios.get(nURL, {
-        timeout: 8000,
-        headers: { 'User-Agent': 'Mozilla/5.0' }
-      });
+    const page = await browser.newPage();
+    await page.setCookie(...parseCookie(cookies));         // ⬅️ kullanıcının cookie’si
+    await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-      /* HTML parse */
-      const $ = cheerio.load(data);
-      const tweets = $('div.main-tweet, .timeline-item')
-        .map((_, el) => $(el).find('.tweet-content').text().trim())
-        .get()
-        .filter(Boolean);
-
-      if (!tweets.length) throw new Error('empty');
-
-      const slice = tweets.slice(0, 15);
-      let text = slice.join('\n\n');
-      if (tweets.length > 15) text += `\n\n…Devamı: ${url}`;
-
-      return res.json({ text, via: base });
-    } catch (e) {
-      /* bu instance başarısız → sonraki dene */
+    /* 1 sn yüklenme bekle, sonra aşağı kaydır  */
+    await new Promise(r => setTimeout(r, 1000));
+    let guard = 0;
+    while (guard < 25) {
+      const n = await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
+      if (n >= 15) break;
+      await page.evaluate(() => window.scrollBy(0, 1200));
+      await new Promise(r => setTimeout(r, 400));
+      guard++;
     }
-  }
 
-  /* Hiçbiri çalışmazsa */
-  res.status(502).json({ error: 'Flood çekilemedi', detail: 'all nitter instances failed' });
+    /* İlk 15 tweet */
+    const list = await page.$$eval(
+      'article div[data-testid="tweetText"]',
+      d => d.map(x => x.innerText.trim()).filter(Boolean).slice(0, 15)
+    );
+
+    await browser.close();
+
+    const text = list.join('\n\n') +
+      (list.length === 15 ? `\n\n…Devamı: ${url}` : '');
+
+    return res.json({ text });
+  } catch (err) {
+    return res.status(500).json({ error: 'Flood çekilemedi', detail: err.message });
+  }
 };
