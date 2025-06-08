@@ -2,18 +2,24 @@ const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST')
+  /*— Yalnızca POST —*/
+  if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Use POST' });
+  }
 
+  /*— URL doğrulama —*/
   const { url } = req.body || {};
-  if (!url || (!url.includes('twitter.com') && !url.includes('x.com')))
+  if (!url || (!url.includes('twitter.com') && !url.includes('x.com'))) {
     return res.status(400).json({ error: 'Geçersiz tweet URL' });
+  }
 
   const tweetId = (url.match(/status\/(\d+)/) || [])[1];
-  if (!tweetId)
+  if (!tweetId) {
     return res.status(400).json({ error: 'Tweet ID bulunamadı' });
+  }
 
   try {
+    /*— Headless Chromium —*/
     const browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
@@ -22,46 +28,67 @@ module.exports = async (req, res) => {
     });
 
     const page = await browser.newPage();
-    await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
+    await page.goto(`https://x.com/i/web/status/${tweetId}`, {
+      waitUntil: 'networkidle2'
+    });
 
-    /* ► 1) Flood yazarının kullanıcı adını yakala */
+    /* 1️⃣  Flood yazarının kullanıcı adını al */
     const author = await page.evaluate(() => {
       const a = document.querySelector('a[href*="/status/"]');
       return a ? a.getAttribute('href').split('/')[1] : null;
     });
     if (!author) throw new Error('Yazar bulunamadı');
 
-    /* ► 2) “Show this thread” düğmesine bas (varsa) */
-    const showThread = await page.$x("//span[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'show this thread')]");
-    if (showThread.length) {
-      await showThread[0].click();
-      await page.waitForTimeout(800);
+    /* 2️⃣  “Show this thread” düğmesine bas (varsa) */
+    const clickedThread = await page.evaluate(() => {
+      const spans = [...document.querySelectorAll('span')];
+      const span  = spans.find(s => s.textContent?.trim().toLowerCase() === 'show this thread');
+      if (!span) return false;
+      const btn = span.closest('a,button,div[role="button"]');
+      if (btn) { btn.click(); return true; }
+      return false;
+    });
+    if (clickedThread) await page.waitForTimeout(800);
+
+    /* 3️⃣  “Show more / Show replies” düğmelerine ardışık tıkla */
+    for (;;) {
+      const clicked = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('div[role="button"],button')];
+        for (const b of btns) {
+          const t = (b.innerText || '').trim().toLowerCase();
+          if (t === 'show more' || t === 'show replies' || t === 'show more replies') {
+            b.click();
+            return true;
+          }
+        }
+        return false;
+      });
+      if (!clicked) break;
+      await page.waitForTimeout(600);
     }
 
-    /* ► 3) Sayfanın hem altına hem en üstüne kadar kaydır */
-    const autoScroll = async (direction = 'down') => {
-      await page.evaluate(async (dir) => {
-        const step   = () => { window.scrollBy(0, dir === 'down' ? 1200 : -1200); };
-        const done   = () => {
-          const { scrollTop, scrollHeight, clientHeight } = document.scrollingElement;
-          return dir === 'down'
-            ? scrollTop + clientHeight + 300 >= scrollHeight
-            : scrollTop <= 0;
-        };
+    /* 4️⃣  Hem alta hem üste kaydır (lazy-load + eski tweet’ler) */
+    const autoScroll = async dir => {
+      await page.evaluate(async direction => {
         await new Promise(resolve => {
-          const loop = () => {
-            if (done()) return resolve();
-            step(); setTimeout(loop, 400);
+          const step = () => {
+            window.scrollBy(0, direction === 'down' ? 1200 : -1200);
+            setTimeout(() => {
+              const { scrollTop, scrollHeight, clientHeight } = document.scrollingElement;
+              const done = direction === 'down'
+                ? scrollTop + clientHeight + 300 >= scrollHeight
+                : scrollTop <= 0;
+              if (done) resolve(); else step();
+            }, 400);
           };
-          loop();
+          step();
         });
-      }, direction);
+      }, dir);
     };
+    await autoScroll('down');
+    await autoScroll('up');
 
-    await autoScroll('down');   // alta kadar
-    await autoScroll('up');     // başa kadar
-
-    /* ► 4) Yalnızca yazarın tweet’lerini topla */
+    /* 5️⃣  Yalnızca yazarın tweetlerini topla */
     const tweets = await page.evaluate(handle => {
       return [...document.querySelectorAll('article')]
         .filter(a => {
