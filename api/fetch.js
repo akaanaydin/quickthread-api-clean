@@ -21,26 +21,27 @@ module.exports = async (req, res) => {
     });
 
     const page = await browser.newPage();
-
-    /* ➊  Çerez zincirini doğrudan “Cookie” başlığına koy */
     await page.setExtraHTTPHeaders({ cookie: cookies });
 
-    /* ➋  Thread sayfasına git */
     await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-    /* ➌  İlk tweet’e tıkla → thread aç */
-    await page.evaluate(() => document.querySelector('a time')?.closest('a')?.click());
-    await page.waitForTimeout(1200);
+    // İlk tweet’e tıkla (daha fazla içerik açmak için)
+    await page.evaluate(() => {
+      const a = document.querySelector('a time')?.closest('a');
+      if (a) a.click();
+    });
 
-    /* ➍  Aşağı kaydırıp en az 15 tweet görünene kadar devam et */
+    // ↓ Buradaki bekleme daha önce `waitForTimeout(1200)` idi
+    await new Promise(r => setTimeout(r, 1200));
+
+    // 15 tweet görünene kadar scroll yap
     for (let i = 0; i < 25; i++) {
-      const n = await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
-      if (n >= 15) break;
+      const count = await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
+      if (count >= 15) break;
       await page.evaluate(() => window.scrollBy(0, 1200));
-      await page.waitForTimeout(400);
+      await new Promise(r => setTimeout(r, 400));
     }
 
-    /* ➎  İlk 15 tweet metnini al */
     const list = await page.$$eval(
       'article div[data-testid="tweetText"]',
       d => d.map(x => x.innerText.trim()).filter(Boolean).slice(0, 15)
