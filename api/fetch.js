@@ -4,6 +4,7 @@ const puppeteer = require('puppeteer-core');
 module.exports = async (req, res) => {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST' });
 
+  /* ▸ URL doğrulama -------------------------------------------------------- */
   const { url } = req.body || {};
   if (!url || (!url.includes('twitter.com') && !url.includes('x.com')))
     return res.status(400).json({ error: 'Geçersiz tweet URL' });
@@ -12,54 +13,70 @@ module.exports = async (req, res) => {
   if (!tweetId) return res.status(400).json({ error: 'Tweet ID bulunamadı' });
 
   try {
+    /* ▸ Headless tarayıcı --------------------------------------------------- */
     const browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
+      headless: chromium.headless
     });
 
     const page = await browser.newPage();
     await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-    /* 1️⃣  Show more / Show more replies düğmelerine tıkla (varsa hepsine) */
+    /* 1️⃣  Flood yazarının kullanıcı adını (handle) al */
+    const author = await page.evaluate(() => {
+      const anchor = document.querySelector('a[role="link"][href*="/status/"]');
+      return anchor ? anchor.getAttribute('href').split('/')[1] : null;
+    });
+    if (!author) throw new Error('Yazar bilgisi alınamadı');
+
+    /* 2️⃣  Show more / Show more replies düğmelerini tıkla */
     for (;;) {
       const clicked = await page.evaluate(() => {
-        const buttons = Array.from(document.querySelectorAll('div[role="button"],button'));
-        for (const btn of buttons) {
-          const txt = btn.innerText?.trim().toLowerCase();
-          if (txt === 'show more' || txt === 'show replies' || txt === 'show more replies') {
-            btn.click();
-            return true; // bir tane tıkladık, döngü devam etsin
+        const btns = [...document.querySelectorAll('div[role="button"],button')];
+        for (const b of btns) {
+          const t = (b.innerText || '').toLowerCase().trim();
+          if (t === 'show more' || t === 'show replies' || t === 'show more replies') {
+            b.click();
+            return true;
           }
         }
-        return false; // tıklanacak düğme kalmadı
+        return false;
       });
       if (!clicked) break;
       await page.waitForTimeout(600);
     }
 
-    /* 2️⃣  Otomatik kaydır: sayfa sonuna kadar */
+    /* 3️⃣  Sayfanın sonuna kadar kaydır */
     await page.evaluate(async () => {
       await new Promise(resolve => {
-        const step = () => {
-          const {scrollTop, scrollHeight, clientHeight} = document.scrollingElement;
-          if (scrollTop + clientHeight + 100 < scrollHeight) {
+        const scroll = () => {
+          const { scrollTop, scrollHeight, clientHeight } = document.scrollingElement;
+          if (scrollTop + clientHeight + 200 < scrollHeight) {
             window.scrollBy(0, 1200);
-            setTimeout(step, 400);
+            setTimeout(scroll, 400);
           } else {
             resolve();
           }
         };
-        step();
+        scroll();
       });
     });
 
-    /* 3️⃣  Flood metnini topla */
-    const tweets = await page.$$eval(
-      'div[data-testid="tweetText"]',
-      divs => divs.map(d => d.innerText.trim()).filter(Boolean)
-    );
+    /* 4️⃣  Yalnızca yazarın tweet’lerini al */
+    const tweets = await page.evaluate(handle => {
+      return [...document.querySelectorAll('article')]
+        .filter(article => {
+          const a = article.querySelector('a[href*="/status/"]');
+          return a && a.getAttribute('href').split('/')[1] === handle;
+        })
+        .map(article => {
+          const div = article.querySelector('div[data-testid="tweetText"]');
+          return div ? div.innerText.trim() : null;
+        })
+        .filter(Boolean);
+    }, author);
 
     await browser.close();
     return res.json({ text: tweets.join('\n\n') });
