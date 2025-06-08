@@ -1,60 +1,78 @@
+/* URL’ye  ?debug=1  eklerseniz fonksiyon
+   • her adımda kaç tweet gördüğünü Vercel log’una yazar
+   • hata verirse ekran görüntüsünü base64 olarak detail’e koyar           */
+
 const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST')
-    return res.status(405).json({ error: 'Use POST' });
+  const debug = req.query?.debug === '1';
 
   const { url } = req.body || {};
-  if (!url || (!url.includes('twitter.com') && !url.includes('x.com')))
-    return res.status(400).json({ error: 'Geçersiz tweet URL' });
+  if (!url) return res.status(400).json({ error: 'url param missing' });
 
   const tweetId = (url.match(/status\/(\d+)/) || [])[1];
-  if (!tweetId)
-    return res.status(400).json({ error: 'Tweet ID bulunamadı' });
+
+  let browser;
+  const log = (...args) => debug && console.log('[DBG]', ...args);
 
   try {
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
       executablePath: await chromium.executablePath(),
       headless: chromium.headless
     });
 
-    const page = await browser.newPage();
+    const page  = await browser.newPage();
     await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-    /* 1 – İlk tweet’in tarih linkine tıkla (thread görünümü açılır) */
-    await page.evaluate(() => {
-      document.querySelector('a time')?.closest('a')?.click();
-    });
-    await new Promise(r => setTimeout(r, 1000));      // 1 sn bekle
+    log('loaded thread page');
 
-    /* 2 – Aşağı kaydırarak en az 15 tweet görünür hâle gelene kadar devam et */
-    let guard = 0;
-    while (guard < 25) {                              // ≈ 10 s üst sınır
-      const count = await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
-      if (count >= 15) break;
+    /* tıkla */
+    await page.evaluate(() => document.querySelector('a time')?.closest('a')?.click());
+    await new Promise(r => setTimeout(r, 1200));
+
+    const countNow = async () =>
+      await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
+
+    log('after click, tweet count:', await countNow());
+
+    /* kaydır */
+    for (let i = 0; i < 30; i++) {
+      const c = await countNow();
+      if (c >= 15) break;
       await page.evaluate(() => window.scrollBy(0, 1000));
       await new Promise(r => setTimeout(r, 400));
-      guard++;
+      log('scroll step', i + 1, 'tweet count:', await countNow());
     }
 
-    /* 3 – Ekranda görünen ilk 15 tweet’i topla (yazar bakılmaksızın) */
-    const { slice, total } = await page.evaluate(limit => {
-      const arr = [...document.querySelectorAll('article div[data-testid="tweetText"]')]
-                  .map(d => d.innerText.trim())
-                  .filter(Boolean);
-      return { slice: arr.slice(0, limit), total: arr.length };
-    }, 15);
+    /* topla */
+    const tweets = await page.$$eval(
+      'article div[data-testid="tweetText"]',
+      d => d.map(v => v.innerText.trim()).filter(Boolean).slice(0, 15)
+    );
+
+    log('final tweet array length:', tweets.length);
 
     await browser.close();
 
-    let text = slice.join('\n\n');
-    if (total > 15) text += `\n\n…Devamını okumak istersen: ${url}`;
+    return res.json({
+      text:
+        tweets.join('\n\n') +
+        (tweets.length === 15 ? `\n\n…Devamı için: ${url}` : '')
+    });
 
-    return res.json({ text });
   } catch (err) {
-    return res.status(500).json({ error: 'Flood çekilemedi', detail: err.message });
+    if (debug && browser) {
+      const [page] = await browser.pages();
+      const snap  = await page.screenshot({ encoding: 'base64', fullPage: true });
+      return res.status(500).json({
+        error: 'debug-shot',
+        detail: err.message,
+        screenshot: snap.slice(0, 120_000)  // ilk 120 KB – log’u şişirmesin
+      });
+    }
+    return res.status(500).json({ error: err.message });
   }
 };
