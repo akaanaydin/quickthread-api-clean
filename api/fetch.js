@@ -1,78 +1,34 @@
-/* URL’ye  ?debug=1  eklerseniz fonksiyon
-   • her adımda kaç tweet gördüğünü Vercel log’una yazar
-   • hata verirse ekran görüntüsünü base64 olarak detail’e koyar           */
-
-const chromium  = require('@sparticuz/chromium');
-const puppeteer = require('puppeteer-core');
+const axios   = require('axios');
+const cheerio = require('cheerio');
 
 module.exports = async (req, res) => {
-  const debug = req.query?.debug === '1';
+  if (req.method !== 'POST')
+    return res.status(405).json({ error: 'Use POST' });
 
   const { url } = req.body || {};
-  if (!url) return res.status(400).json({ error: 'url param missing' });
+  if (!url) return res.status(400).json({ error: 'url missing' });
 
-  const tweetId = (url.match(/status\/(\d+)/) || [])[1];
-
-  let browser;
-  const log = (...args) => debug && console.log('[DBG]', ...args);
+  /* URL’yi nitter biçimine dönüştür */
+  const parts = url.replace(/^https?:\/\//, '').split('/');
+  const user  = parts[1];
+  const id    = parts[3];
+  const nURL  = `https://nitter.net/${user}/status/${id}`;
 
   try {
-    browser = await puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: chromium.defaultViewport,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless
-    });
+    const { data } = await axios.get(nURL, { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    const $ = cheerio.load(data);
 
-    const page  = await browser.newPage();
-    await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
+    /* Flood metinlerini seç: ana tweet + yanıtları */
+    const tweets = $('div.main-tweet, .timeline-item').map((_, el) => {
+      return $(el).find('.tweet-content').text().trim();
+    }).get().filter(Boolean);
 
-    log('loaded thread page');
+    const slice = tweets.slice(0, 15);
+    let text = slice.join('\n\n');
+    if (tweets.length > 15) text += `\n\n…Devamını okumak istersen: ${url}`;
 
-    /* tıkla */
-    await page.evaluate(() => document.querySelector('a time')?.closest('a')?.click());
-    await new Promise(r => setTimeout(r, 1200));
-
-    const countNow = async () =>
-      await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
-
-    log('after click, tweet count:', await countNow());
-
-    /* kaydır */
-    for (let i = 0; i < 30; i++) {
-      const c = await countNow();
-      if (c >= 15) break;
-      await page.evaluate(() => window.scrollBy(0, 1000));
-      await new Promise(r => setTimeout(r, 400));
-      log('scroll step', i + 1, 'tweet count:', await countNow());
-    }
-
-    /* topla */
-    const tweets = await page.$$eval(
-      'article div[data-testid="tweetText"]',
-      d => d.map(v => v.innerText.trim()).filter(Boolean).slice(0, 15)
-    );
-
-    log('final tweet array length:', tweets.length);
-
-    await browser.close();
-
-    return res.json({
-      text:
-        tweets.join('\n\n') +
-        (tweets.length === 15 ? `\n\n…Devamı için: ${url}` : '')
-    });
-
+    return res.json({ text });
   } catch (err) {
-    if (debug && browser) {
-      const [page] = await browser.pages();
-      const snap  = await page.screenshot({ encoding: 'base64', fullPage: true });
-      return res.status(500).json({
-        error: 'debug-shot',
-        detail: err.message,
-        screenshot: snap.slice(0, 120_000)  // ilk 120 KB – log’u şişirmesin
-      });
-    }
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: 'Flood çekilemedi', detail: err.message });
   }
 };
