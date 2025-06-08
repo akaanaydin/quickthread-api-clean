@@ -24,58 +24,34 @@ module.exports = async (req, res) => {
     const page = await browser.newPage();
     await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-    /* 1️⃣ Flood sahibinin kullanıcı adını al */
-    const author = await page.evaluate(() => {
-      const a = document.querySelector('a[href*="/status/"]');
-      return a ? a.getAttribute('href').split('/')[1] : null;
-    });
-    if (!author) throw new Error('Yazar bulunamadı');
-
-    /* 2️⃣ İlk tweete (tarih) tıkla → tüm thread açılır  */
+    /* 1 – İlk tweet’in tarih linkine tıkla (thread görünümü açılır) */
     await page.evaluate(() => {
       document.querySelector('a time')?.closest('a')?.click();
     });
-    /* Yüklenme için 1 s bekle */
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 1000));      // 1 sn bekle
 
-    /* 3️⃣ Aşağı kaydır; 15 tweet dolunca veya farklı yazar görünce dur */
+    /* 2 – Aşağı kaydırarak en az 15 tweet görünür hâle gelene kadar devam et */
     let guard = 0;
-    while (guard < 40) {                  // maks. 40 tur ≈ 16 s
-      const { mine, others } = await page.evaluate(handle => {
-        const arts = [...document.querySelectorAll('article')];
-        let mine = 0, others = 0;
-        for (const a of arts) {
-          const h = a.querySelector('a[href*="/status/"]');
-          if (!h) continue;
-          const who = h.getAttribute('href').split('/')[1];
-          if (who === handle) mine++; else others++;
-        }
-        return { mine, others };
-      }, author);
-
-      if (mine >= 15 || others > 0) break;
-
+    while (guard < 25) {                              // ≈ 10 s üst sınır
+      const count = await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
+      if (count >= 15) break;
       await page.evaluate(() => window.scrollBy(0, 1000));
       await new Promise(r => setTimeout(r, 400));
       guard++;
     }
 
-    /* 4️⃣ İlk 15 tweet’i topla */
-    const { slice, total } = await page.evaluate((handle, lim) => {
-      const tw = [...document.querySelectorAll('article')]
-        .filter(a => {
-          const h = a.querySelector('a[href*="/status/"]');
-          return h && h.getAttribute('href').split('/')[1] === handle;
-        })
-        .map(a => a.querySelector('div[data-testid="tweetText"]')?.innerText.trim())
-        .filter(Boolean);
-      return { slice: tw.slice(0, lim), total: tw.length };
-    }, author, 15);
+    /* 3 – Ekranda görünen ilk 15 tweet’i topla (yazar bakılmaksızın) */
+    const { slice, total } = await page.evaluate(limit => {
+      const arr = [...document.querySelectorAll('article div[data-testid="tweetText"]')]
+                  .map(d => d.innerText.trim())
+                  .filter(Boolean);
+      return { slice: arr.slice(0, limit), total: arr.length };
+    }, 15);
 
     await browser.close();
 
     let text = slice.join('\n\n');
-    if (total > 15) text += `\n\n… Devamını okumak istersen: ${url}`;
+    if (total > 15) text += `\n\n…Devamını okumak istersen: ${url}`;
 
     return res.json({ text });
   } catch (err) {
