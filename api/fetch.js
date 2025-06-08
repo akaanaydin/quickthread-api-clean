@@ -22,21 +22,23 @@ module.exports = async (req, res) => {
     const page = await browser.newPage();
     await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-    /* 1️⃣  Flood sahibinin kullanıcı adını al */
+    /* 1️⃣  Flood yazarının kullanıcı adını al */
     const author = await page.evaluate(() => {
       const a = document.querySelector('a[href*="/status/"]');
       return a ? a.getAttribute('href').split('/')[1] : null;
     });
     if (!author) throw new Error('Yazar bulunamadı');
 
-    /* 2️⃣  İlk tweet’in tarih-linkine tıkla → tüm zincir görünümü açılır */
+    /* 2️⃣  İlk tweet’e (tarih linki) tıkla → thread görünümü */
     await page.evaluate(() => {
       const ts = document.querySelector('a time');
-      if (ts) ts.closest('a')?.click();
+      ts?.closest('a')?.click();
     });
-    await page.waitForTimeout(800);
 
-    /* 3️⃣  Show more / Show replies düğmelerine ardışık tıkla */
+    /* 3️⃣  Tweet’lerin yüklenebilmesi için 1,5 sn bekle */
+    await new Promise(r => setTimeout(r, 1500));
+
+    /* 4️⃣  Show more / Show replies butonlarına bas */
     for (;;) {
       const clicked = await page.evaluate(() => {
         const btns = [...document.querySelectorAll('div[role="button"],button')];
@@ -49,27 +51,27 @@ module.exports = async (req, res) => {
         return false;
       });
       if (!clicked) break;
-      await page.waitForTimeout(600);
+      await new Promise(r => setTimeout(r, 600));
     }
 
-    /* 4️⃣  Aşağı kaydır, başka kullanıcı tweet’i görünce dur */
-    let done = false, safety = 0;
-    while (!done && safety < 120) {
-      done = await page.evaluate(handle => {
+    /* 5️⃣  Aşağı kaydır; farklı yazar görünce dur */
+    let stop = false, guard = 0;
+    while (!stop && guard < 120) {
+      stop = await page.evaluate(handle => {
         const arts = [...document.querySelectorAll('article')];
         if (!arts.length) return false;
         const last = arts[arts.length - 1];
         const link = last.querySelector('a[href*="/status/"]');
         const who  = link ? link.getAttribute('href').split('/')[1] : '';
-        if (who && who !== handle) return true;    // farklı yazar → dur
+        if (who && who !== handle) return true;   // farklı yazar → dur
         window.scrollBy(0, 1000);
         return false;
       }, author);
-      await page.waitForTimeout(400);
-      safety++;
+      await new Promise(r => setTimeout(r, 400));
+      guard++;
     }
 
-    /* 5️⃣  Yalnızca flood sahibinin tweet’lerini topla */
+    /* 6️⃣  Sadece flood yazarının tweet’lerini topla */
     const tweets = await page.evaluate(handle =>
       [...document.querySelectorAll('article')]
         .filter(a => {
