@@ -1,84 +1,55 @@
-const puppeteer = require('puppeteer-core');
-const chromium = require('@sparticuz/chromium');
+const axios   = require('axios');
+const cheerio = require('cheerio');
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Only POST method allowed' });
-  }
+  if (req.method !== 'POST')
+    return res.status(405).json({ error: 'Use POST' });
 
   const { url, cookies } = req.body || {};
-  if (!url || !cookies) {
+  if (!url || !cookies)
     return res.status(400).json({ error: 'Missing url or cookies' });
-  }
 
-  const tweetIdMatch = url.match(/status\/(\d+)/);
-  const tweetId = tweetIdMatch?.[1];
-  if (!tweetId) {
-    return res.status(400).json({ error: 'Invalid tweet URL' });
-  }
+  /* tweet ID + kullanıcı adı ayıkla */
+  const m = url.match(/https?:\/\/[^/]+\/([^/]+)\/status\/(\d+)/);
+  if (!m) return res.status(400).json({ error: 'Bad tweet URL' });
+  const [ , user, id ] = m;
 
-  const tweetPageUrl = `https://x.com/i/web/status/${tweetId}`;
-  console.log("🔗 Tweet URL:", tweetPageUrl);
+  /* mobil Twitter URL’si */
+  const mURL = `https://mobile.twitter.com/${user}/status/${id}`;
 
   try {
-    const browser = await puppeteer.launch({
-      args: chromium.args,
-      executablePath: await chromium.executablePath(),
-      headless: chromium.headless,
+    const { data: html } = await axios.get(mURL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0',
+        'Cookie': cookies            /*  ← auth_token=…; ct0=…; guest_id=…  */
+      },
+      timeout: 10000
     });
 
-    const page = await browser.newPage();
-    await page.setExtraHTTPHeaders({ cookie: cookies });
+    /* giriş sayfası yerine beklenen tweet geldi mi? */
+    if (/Log in|Sign up/i.test(html))
+      return res.status(403).json({ error: 'Cookie geçersiz – giriş sayfası döndü' });
 
-    await page.goto(tweetPageUrl, { waitUntil: 'networkidle2' });
-    await page.waitForTimeout?.(2500) ?? new Promise(r => setTimeout(r, 2500));
+    /* HTML parse */
+    const $ = cheerio.load(html);
 
-    // login kontrol
-    const html = await page.content();
-    if (html.includes("Log in") || html.includes("Sign up")) {
-      console.log("⚠️ Login sayfası geldi");
-      return res.status(403).json({ error: "Giriş yapılmamış — geçersiz cookie" });
-    }
+    /* Flood içindeki tweet metinleri  */
+    const tweets = $('div.tweet-text, div[dir="auto"]')
+        .map((_, el) => $(el).text().trim())
+        .get()
+        .filter(Boolean);
 
-    // ilk tweet'e tıklama
-    await page.evaluate(() => {
-      const tweetAnchor = document.querySelector('a time')?.closest('a');
-      if (tweetAnchor) tweetAnchor.click();
-    });
+    if (!tweets.length)
+      return res.status(200).json({ text: '[Tweet bulunamadı] ' });
 
-    await page.waitForTimeout?.(2000) ?? new Promise(r => setTimeout(r, 2000));
+    const slice = tweets.slice(0, 15);
+    let text = slice.join('\n\n');
+    if (tweets.length > 15)
+      text += `\n\n…Devamı: ${url}`;
 
-    // scroll ve içerik toplama
-    for (let i = 0; i < 20; i++) {
-      const count = await page.$$eval('article div[data-testid="tweetText"]', d => d.length);
-      console.log(`🔁 Scroll step ${i}, tweet count: ${count}`);
-      if (count >= 15) break;
-      await page.evaluate(() => window.scrollBy(0, 1200));
-      await new Promise(r => setTimeout(r, 500));
-    }
-
-    const tweets = await page.$$eval(
-      'article div[data-testid="tweetText"]',
-      nodes => nodes.map(el => el.innerText.trim()).filter(Boolean).slice(0, 15)
-    );
-
-    await browser.close();
-
-    if (!tweets.length) {
-      console.log("⚠️ Tweet içeriği boş");
-      return res.status(200).json({ text: '[Tweet bulunamadı — içerik boş]' });
-    }
-
-    let finalText = tweets.join('\n\n');
-    if (tweets.length === 15) {
-      finalText += `\n\n…Devamı için: ${url}`;
-    }
-
-    console.log("✅ Tweetler başarıyla alındı:", tweets.length);
-    return res.status(200).json({ text: finalText });
+    return res.status(200).json({ text });
 
   } catch (err) {
-    console.error("❌ Hata:", err.message);
-    return res.status(500).json({ error: "Flood çekilemedi", detail: err.message });
+    return res.status(500).json({ error: 'Flood çekilemedi', detail: err.message });
   }
 };
