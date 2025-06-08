@@ -2,14 +2,16 @@ const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 
 module.exports = async (req, res) => {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST' });
+  if (req.method !== 'POST')
+    return res.status(405).json({ error: 'Use POST' });
 
   const { url } = req.body || {};
   if (!url || (!url.includes('twitter.com') && !url.includes('x.com')))
     return res.status(400).json({ error: 'Geçersiz tweet URL' });
 
   const tweetId = (url.match(/status\/(\d+)/) || [])[1];
-  if (!tweetId) return res.status(400).json({ error: 'Tweet ID bulunamadı' });
+  if (!tweetId)
+    return res.status(400).json({ error: 'Tweet ID bulunamadı' });
 
   try {
     const browser = await puppeteer.launch({
@@ -22,33 +24,47 @@ module.exports = async (req, res) => {
     const page = await browser.newPage();
     await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-    /* 1) flood yazarının kullanıcı adını al */
+    /* ► flood sahibinin kullanıcı adını al */
     const author = await page.evaluate(() => {
       const a = document.querySelector('a[href*="/status/"]');
       return a ? a.getAttribute('href').split('/')[1] : null;
     });
     if (!author) throw new Error('Yazar bulunamadı');
 
-    /* 2) ilk tweet’e (tarih linki) tıkla → thread görünümü */
+    /* ► ilk tweet’e tıkla */
     await page.evaluate(() => {
-      const ts = document.querySelector('a time');
-      ts?.closest('a')?.click();
+      document.querySelector('a time')?.closest('a')?.click();
     });
 
-    /* 3) yüklenme için 1,5 s bekle */
-    await new Promise(r => setTimeout(r, 1500));
+    await new Promise(r => setTimeout(r, 1000));   // 1 sn bekle
 
-    /* 4) flood sahibinin tweet’lerini topla (maks. 15) */
+    /* ► Aşağı kaydır – 15 tweet toplanana kadar */
+    let tries = 0;
+    while (tries < 20) {                 // en fazla 20 tur
+      const collected = await page.evaluate(handle => {
+        return [...document.querySelectorAll('article')]
+          .filter(a => {
+            const h = a.querySelector('a[href*="/status/"]');
+            return h && h.getAttribute('href').split('/')[1] === handle;
+          }).length;
+      }, author);
+
+      if (collected >= 15) break;        // yeterli
+      await page.evaluate(() => window.scrollBy(0, 1000));
+      await new Promise(r => setTimeout(r, 400));
+      tries++;
+    }
+
+    /* ► ilk 15 tweet’i topla */
     const { slice, total } = await page.evaluate((handle, limit) => {
-      const alls = [...document.querySelectorAll('article')]
+      const all = [...document.querySelectorAll('article')]
         .filter(a => {
           const h = a.querySelector('a[href*="/status/"]');
           return h && h.getAttribute('href').split('/')[1] === handle;
         })
         .map(a => a.querySelector('div[data-testid="tweetText"]')?.innerText.trim())
         .filter(Boolean);
-
-      return { slice: alls.slice(0, limit), total: alls.length };
+      return { slice: all.slice(0, limit), total: all.length };
     }, author, 15);
 
     await browser.close();
