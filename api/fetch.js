@@ -1,6 +1,13 @@
 const axios   = require('axios');
 const cheerio = require('cheerio');
 
+const NITTERS = [
+  'https://nitter.net',
+  'https://nitter.pufe.org',
+  'https://nitter.whatever.social',
+  'https://nitter.cz'
+];
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST')
     return res.status(405).json({ error: 'Use POST' });
@@ -8,27 +15,38 @@ module.exports = async (req, res) => {
   const { url } = req.body || {};
   if (!url) return res.status(400).json({ error: 'url missing' });
 
-  /* URL’yi nitter biçimine dönüştür */
-  const parts = url.replace(/^https?:\/\//, '').split('/');
-  const user  = parts[1];
-  const id    = parts[3];
-  const nURL  = `https://nitter.net/${user}/status/${id}`;
+  /* tweet URL parçala */
+  const m = url.match(/https?:\/\/[^/]+\/([^/]+)\/status\/(\d+)/);
+  if (!m) return res.status(400).json({ error: 'bad tweet url' });
+  const [ , user, id ] = m;
 
-  try {
-    const { data } = await axios.get(nURL, { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-    const $ = cheerio.load(data);
+  for (const base of NITTERS) {
+    try {
+      const nURL = `${base}/${user}/status/${id}`;
+      const { data } = await axios.get(nURL, {
+        timeout: 8000,
+        headers: { 'User-Agent': 'Mozilla/5.0' }
+      });
 
-    /* Flood metinlerini seç: ana tweet + yanıtları */
-    const tweets = $('div.main-tweet, .timeline-item').map((_, el) => {
-      return $(el).find('.tweet-content').text().trim();
-    }).get().filter(Boolean);
+      /* HTML parse */
+      const $ = cheerio.load(data);
+      const tweets = $('div.main-tweet, .timeline-item')
+        .map((_, el) => $(el).find('.tweet-content').text().trim())
+        .get()
+        .filter(Boolean);
 
-    const slice = tweets.slice(0, 15);
-    let text = slice.join('\n\n');
-    if (tweets.length > 15) text += `\n\n…Devamını okumak istersen: ${url}`;
+      if (!tweets.length) throw new Error('empty');
 
-    return res.json({ text });
-  } catch (err) {
-    return res.status(500).json({ error: 'Flood çekilemedi', detail: err.message });
+      const slice = tweets.slice(0, 15);
+      let text = slice.join('\n\n');
+      if (tweets.length > 15) text += `\n\n…Devamı: ${url}`;
+
+      return res.json({ text, via: base });
+    } catch (e) {
+      /* bu instance başarısız → sonraki dene */
+    }
   }
+
+  /* Hiçbiri çalışmazsa */
+  res.status(502).json({ error: 'Flood çekilemedi', detail: 'all nitter instances failed' });
 };
