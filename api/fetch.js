@@ -2,24 +2,18 @@ const chromium  = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
 
 module.exports = async (req, res) => {
-  /*— Yalnızca POST —*/
-  if (req.method !== 'POST') {
+  if (req.method !== 'POST')
     return res.status(405).json({ error: 'Use POST' });
-  }
 
-  /*— URL doğrulama —*/
   const { url } = req.body || {};
-  if (!url || (!url.includes('twitter.com') && !url.includes('x.com'))) {
+  if (!url || (!url.includes('twitter.com') && !url.includes('x.com')))
     return res.status(400).json({ error: 'Geçersiz tweet URL' });
-  }
 
   const tweetId = (url.match(/status\/(\d+)/) || [])[1];
-  if (!tweetId) {
+  if (!tweetId)
     return res.status(400).json({ error: 'Tweet ID bulunamadı' });
-  }
 
   try {
-    /*— Headless Chromium —*/
     const browser = await puppeteer.launch({
       args: chromium.args,
       defaultViewport: chromium.defaultViewport,
@@ -28,69 +22,44 @@ module.exports = async (req, res) => {
     });
 
     const page = await browser.newPage();
-    await page.goto(`https://x.com/i/web/status/${tweetId}`, {
-      waitUntil: 'networkidle2'
-    });
+    await page.goto(`https://x.com/i/web/status/${tweetId}`, { waitUntil: 'networkidle2' });
 
-    /* 1️⃣  Flood yazarının kullanıcı adını al */
+    /* ► Flood yazarını (handle) al */
     const author = await page.evaluate(() => {
       const a = document.querySelector('a[href*="/status/"]');
       return a ? a.getAttribute('href').split('/')[1] : null;
     });
     if (!author) throw new Error('Yazar bulunamadı');
 
-    /* 2️⃣  “Show this thread” düğmesine bas (varsa) */
-    const clickedThread = await page.evaluate(() => {
+    /* ► “Show this thread” varsa tıkla (ilk tweet altında) */
+    await page.evaluate(() => {
       const spans = [...document.querySelectorAll('span')];
-      const span  = spans.find(s => s.textContent?.trim().toLowerCase() === 'Show more replies');
-      if (!span) return false;
-      const btn = span.closest('a,button,div[role="button"]');
-      if (btn) { btn.click(); return true; }
-      return false;
+      const s = spans.find(sp => sp.textContent?.trim().toLowerCase() === 'show this thread');
+      if (s) s.closest('a,button,div[role="button"]')?.click();
     });
-    if (clickedThread) await page.waitForTimeout(800);
+    await page.waitForTimeout(600);
 
-    /* 3️⃣  “Show more / Show replies” düğmelerine ardışık tıkla */
-    for (;;) {
-      const clicked = await page.evaluate(() => {
-        const btns = [...document.querySelectorAll('div[role="button"],button')];
-        for (const b of btns) {
-          const t = (b.innerText || '').trim().toLowerCase();
-          if (t === 'show more' || t === 'show replies' || t === 'show more replies') {
-            b.click();
-            return true;
-          }
-        }
+    /* ► Aşağı kaydır; başka kullanıcı tweet’i görünce dur */
+    let done = false;
+    let safety = 0;
+    while (!done && safety < 120) {
+      done = await page.evaluate(handle => {
+        const arts = [...document.querySelectorAll('article')];
+        if (!arts.length) return false;
+        const last = arts[arts.length - 1];
+        const link = last.querySelector('a[href*="/status/"]');
+        const who  = link ? link.getAttribute('href').split('/')[1] : '';
+        if (who && who !== handle) return true; // başka yazar gördük → dur
+        window.scrollBy(0, 1000);
         return false;
-      });
-      if (!clicked) break;
-      await page.waitForTimeout(600);
+      }, author);
+      await page.waitForTimeout(400);
+      safety++;
     }
 
-    /* 4️⃣  Hem alta hem üste kaydır (lazy-load + eski tweet’ler) */
-    const autoScroll = async dir => {
-      await page.evaluate(async direction => {
-        await new Promise(resolve => {
-          const step = () => {
-            window.scrollBy(0, direction === 'down' ? 1200 : -1200);
-            setTimeout(() => {
-              const { scrollTop, scrollHeight, clientHeight } = document.scrollingElement;
-              const done = direction === 'down'
-                ? scrollTop + clientHeight + 300 >= scrollHeight
-                : scrollTop <= 0;
-              if (done) resolve(); else step();
-            }, 400);
-          };
-          step();
-        });
-      }, dir);
-    };
-    await autoScroll('down');
-    await autoScroll('up');
-
-    /* 5️⃣  Yalnızca yazarın tweetlerini topla */
-    const tweets = await page.evaluate(handle => {
-      return [...document.querySelectorAll('article')]
+    /* ► Flood sahibine ait tweetleri topla */
+    const tweets = await page.evaluate(handle =>
+      [...document.querySelectorAll('article')]
         .filter(a => {
           const h = a.querySelector('a[href*="/status/"]');
           return h && h.getAttribute('href').split('/')[1] === handle;
@@ -99,8 +68,8 @@ module.exports = async (req, res) => {
           const d = a.querySelector('div[data-testid="tweetText"]');
           return d ? d.innerText.trim() : null;
         })
-        .filter(Boolean);
-    }, author);
+        .filter(Boolean)
+    , author);
 
     await browser.close();
     return res.json({ text: tweets.join('\n\n') });
